@@ -31,6 +31,52 @@ class VAEWMAttacker(WMAttacker):
         else:
             raise ValueError('model name not supported')
         self.device = device
+        
+    def extend_to_multiple(self,image:Image.Image, multiple:int=64, background_color='white'):
+        """
+        将图像扩展到最接近指定倍数的尺寸，并在新图像中居中放置原始图像。
+        
+        :param image: 输入的PIL图像对象
+        :param multiple: 指定的倍数，默认为64
+        :param background_color: 背景颜色，默认为白色
+        :return: 扩展后的PIL图像对象
+        """
+        original_width, original_height = image.size
+        
+        # 计算扩展到指定倍数后的尺寸
+        new_width = ((original_width + multiple - 1) // multiple) * multiple
+        new_height = ((original_height + multiple - 1) // multiple) * multiple
+        
+        # 创建一个新的背景图像
+        # 将原图像粘贴到新图像的中心
+        extended_img = Image.new(image.mode, (new_width, new_height), background_color)
+        paste_position = ((new_width - original_width) // 2, (new_height - original_height) // 2)
+        extended_img.paste(image, paste_position)
+        
+        return extended_img
+
+
+    def crop_to_original(self,image:Image.Image, original_size):
+        """
+        将图像裁剪回原始大小。
+        
+        :param image: 输入的PIL图像对象
+        :param original_size: 原始图像的尺寸，格式为 (width, height)
+        :return: 裁剪后的PIL图像对象
+        """
+        original_width, original_height = original_size
+        current_width, current_height = image.size
+        
+        # 计算裁剪区域
+        left = (current_width - original_width) // 2
+        top = (current_height - original_height) // 2
+        right = left + original_width
+        bottom = top + original_height
+        
+        # 裁剪图像
+        cropped_img = image.crop((left, top, right, bottom))
+        
+        return cropped_img
 
     def attack(self, image_paths, out_paths, multi=False):
         for (img_path, out_path) in tqdm(zip(image_paths, out_paths)):
@@ -38,11 +84,15 @@ class VAEWMAttacker(WMAttacker):
                 continue
             
             img = Image.open(img_path).convert('RGB')
-            img = img.resize((512, 512))
-            img = transforms.ToTensor()(img).unsqueeze(0).to(self.device)
-            out = self.model(img)
+            img_expanded = self.extend_to_multiple(img,multiple=64)
+            # img = img.resize((512, 512))
+            img_expanded = transforms.ToTensor()(img_expanded).unsqueeze(0).to(self.device)
+            
+            out = self.model(img_expanded)
             out['x_hat'].clamp_(0, 1)
             rec = transforms.ToPILImage()(out['x_hat'].squeeze().cpu())
+            rec = self.crop_to_original(rec,img.size)
+            
             rec.save(out_path)
 
 
@@ -148,9 +198,9 @@ class RotateAttacker(WMAttacker):
             if os.path.exists(out_path) and not multi:
                 continue
             
-            img = Image.open(img_path)
-            img = img.rotate(self.degree, expand=self.expand)
-            img = img.resize((512,512))
+            img_original = Image.open(img_path)
+            img = img_original.rotate(self.degree, expand=self.expand)
+            img = img.resize(img_original.size)
             img.save(out_path)
 
 

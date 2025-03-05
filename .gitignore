@@ -7,6 +7,8 @@ log/
 plot/
 ssl_watermarking/
 StegaStamp/
+example copy/
+torch_cache/
 
 *.sbatch
 *.sh

@@ -8,6 +8,9 @@ from torchvision.transforms.functional import pil_to_tensor
 from torchvision import transforms
 import torch
 
+from typing import Optional
+
+
 
 def show_images_side_by_side(images, titles=None, figsize=(8,4)):
     """
@@ -49,9 +52,87 @@ def save_img(path, img: torch.Tensor, pipe):
     pil_img.save(path)
     return
 
-def get_img_tensor(img_path, device):
-    img_tensor = pil_to_tensor(Image.open(img_path).convert("RGB"))/255
-    return img_tensor.unsqueeze(0).to(device)
+def _round_up_to_8(n):
+    return (n + 7) // 8 * 8
+
+
+
+
+def _make_square(img:Image.Image, fill_color=(255, 255, 255))->Image.Image:
+    width, height = img.size
+    # 计算长边
+    max_size = _round_up_to_8(max(width, height))
+    
+    # 创建新的方形图像
+    new_img = Image.new("RGB", (max_size, max_size), fill_color)
+    paste_position = ((max_size - width) // 2, (max_size - height) // 2)
+    new_img.paste(img, paste_position)
+    return new_img
+
+
+
+def _make_square_black_white(img: Image.Image, fill_color=0) -> Image.Image:
+    # 确保输入图像是二值图像（黑白）
+    if img.mode != '1' and img.mode != 'L':
+        img = img.convert('L')  # 转换为灰度模式
+        img = img.point(lambda x: 0 if x < 128 else 255, '1')  # 转换为二值图像
+    
+    width, height = img.size
+    max_size = _round_up_to_8(max(width, height))
+    
+    # 创建新的方形图像，使用白色背景
+    new_img = Image.new("1", (max_size, max_size), fill_color)  # 使用灰度模式"L"    
+    paste_position = ((max_size - width) // 2, (max_size - height) // 2)
+    new_img.paste(img, paste_position)
+
+    return new_img
+
+
+def _center_crop(img, output_size):
+    # 获取图像的原始尺寸
+    width, height = img.size
+    target_width, target_height = output_size
+    if target_width > width or target_height > height:
+        raise ValueError("目标尺寸不能超过原始图像尺寸")
+    
+    left,right = (width - target_width) / 2,(width + target_width) / 2
+    top,bottom = (height - target_height) / 2,(height + target_height) / 2
+    cropped_img = img.crop((left, top, right, bottom))    
+    return cropped_img
+
+
+def mask_img_tensor(
+    img_tensor, mask:str, mask_value:Optional[int]=255,background_image:Optional[str]=None):
+    
+    img_mask = _make_square_black_white(Image.open(mask).convert("1"))
+    img_mask_tensor = pil_to_tensor(img_mask).repeat((3,1,1))
+    background_value = mask_value
+    if bool(background_image):
+        # 加载图片，随机截取和目标区域等大的区域，转换为图片
+        background = Image.open(background_image).convert("RGB")
+        background = _center_crop(background,tuple(img_tensor.shape[-2:]))
+        background_value_tensor = pil_to_tensor(background)
+    else:
+        background_value_tensor = torch.full_like(
+            img_tensor, background_value,)
+        
+    img_tensor = torch.where(
+        img_mask_tensor,img_tensor,background_value_tensor)
+    return img_tensor
+
+
+def get_img_tensor(
+    img_path, device, mask:Optional[str]=None, mask_value:Optional[int]=255,
+    background_image:Optional[str]=None):
+    img = Image.open(img_path).convert("RGB")
+    img_square = _make_square(img)
+    img_tensor = pil_to_tensor(img_square)
+    
+    if bool(mask):
+        img_tensor=mask_img_tensor(
+            img_tensor,mask,mask_value,background_image)
+    img_tensor = (img_tensor/255)
+    return img_tensor.to(device)
 
 def create_output_folder(cfgs):
     parent = os.path.join(cfgs['save_img'], cfgs['dataset'])
@@ -97,7 +178,7 @@ def eval_lpips(ori_img_path, new_img_path, metric, device):
 # Detect watermark from one image
 def watermark_prob(img, dect_pipe, wm_pipe, text_embeddings, tree_ring=True, device=torch.device('cuda')):
     if isinstance(img, str):
-        img_tensor = pil_to_tensor(Image.open(img).convert("RGB"))/255
+        img_tensor = get_img_tensor(img,device=device,)
         img_tensor = img_tensor.unsqueeze(0).to(device)
     elif isinstance(img, torch.Tensor):
         img_tensor = img

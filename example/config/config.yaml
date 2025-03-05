@@ -3,7 +3,7 @@ method: 'ZoDiac'
 save_img: './example/output/' 
 
 # for stable diffusion
-model_id: 'stabilityai/stable-diffusion-2-1-base'
+model_id: './stable-diffusion-2-1-base'
 gen_seed: 0  # the seed for generating gt image; no use for watermarking existing imgs
 empty_prompt: True # whether to use the caption of the image
 
@@ -15,8 +15,10 @@ w_seed: 10
 
 # for updating
 start_latents: 'init_w' # 'init', 'init_w', 'rand', 'rand_w'
+# iters: 60
+# save_iters: [20,40,60]
 iters: 100
-save_iters: [100]
+save_iters: [20,40,60,80,100]
 loss_weights: [10.0, 0.1, 1.0, 0.0] # L2 loss, watson-vgg loss, SSIM loss, watermark L1 loss
 
 # for postprocessing and detection
