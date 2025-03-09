@@ -17,26 +17,27 @@ class ModifiedStableDiffusionPipelineOutput(BaseOutput):
     nsfw_content_detected: Optional[List[bool]]
     init_latents: Optional[torch.FloatTensor]
 
+
 class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
     def __init__(self,
-        vae,
-        text_encoder,
-        tokenizer,
-        unet,
-        scheduler,
-        safety_checker,
-        feature_extractor,
-        requires_safety_checker: bool = True,
-    ):
+                 vae,
+                 text_encoder,
+                 tokenizer,
+                 unet,
+                 scheduler,
+                 safety_checker,
+                 feature_extractor,
+                 requires_safety_checker: bool = True,
+                 ):
         super(WatermarkStableDiffusionPipeline, self).__init__(vae,
-                text_encoder,
-                tokenizer,
-                unet,
-                scheduler,
-                safety_checker,
-                feature_extractor,
-                requires_safety_checker)
-    
+                                                               text_encoder,
+                                                               tokenizer,
+                                                               unet,
+                                                               scheduler,
+                                                               safety_checker,
+                                                               feature_extractor,
+                                                               requires_safety_checker)
+
     # Generate image in tensor format
     def decode_latents_tensor(self, latents):
         latents = 1 / self.vae.config.scaling_factor * latents
@@ -45,11 +46,11 @@ class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         # image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         return image
-    
+
     # Convert image tensor into numpy, so that it can be converted into PIL image later
     def img_tensor_to_numpy(self, tensor):
         return tensor.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-    
+
     # Accept keywords args in torch.checkpoint
     def unet_custom_forward(self,
                             sample: torch.FloatTensor,
@@ -57,7 +58,7 @@ class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
                             encoder_hidden_states: torch.Tensor,
                             cross_attention_kwargs: Optional[Dict[str, Any]] = None,):
         return self.unet(sample, timestep, encoder_hidden_states=encoder_hidden_states, cross_attention_kwargs=cross_attention_kwargs)
-    
+
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -68,16 +69,18 @@ class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        generator: Optional[Union[torch.Generator,
+                                  List[torch.Generator]]] = None,
         # latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback: Optional[Callable[[
+            int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        ### added parameters
+        # added parameters
         use_trainable_latents: bool = False,
         init_latents: Optional[torch.FloatTensor] = None,
     ):
@@ -218,12 +221,15 @@ class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7. Denoising loop
-        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        num_warmup_steps = len(timesteps) - \
+            num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = torch.cat(
+                    [latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t)
 
                 # predict the noise residual
                 if not use_trainable_latents:
@@ -234,15 +240,18 @@ class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
                         cross_attention_kwargs=cross_attention_kwargs,
                     ).sample
                 else:
-                    noise_pred = checkpoint(self.unet_custom_forward, latent_model_input, t, prompt_embeds, cross_attention_kwargs).sample
+                    noise_pred = checkpoint(
+                        self.unet_custom_forward, latent_model_input, t, prompt_embeds, cross_attention_kwargs).sample
 
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + guidance_scale * \
+                        (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
@@ -258,46 +267,50 @@ class WatermarkStableDiffusionPipeline(StableDiffusionPipeline):
             image = self.decode_latents(latents)
 
             # 9. Run safety checker
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            image, has_nsfw_concept = self.run_safety_checker(
+                image, device, prompt_embeds.dtype)
 
             # 10. Convert to PIL
             image = self.numpy_to_pil(image)
         elif output_type == 'tensor':
             # 8. Post-processing
-            image = self.decode_latents_tensor(latents) 
+            image = self.decode_latents_tensor(latents)
             has_nsfw_concept = None
         else:
             # 8. Post-processing
             image = self.decode_latents(latents)
 
             # 9. Run safety checker
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            image, has_nsfw_concept = self.run_safety_checker(
+                image, device, prompt_embeds.dtype)
 
         if not return_dict:
             return (image, has_nsfw_concept, init_latents)
 
         return ModifiedStableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept, init_latents=init_latents)
 
+
 class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
     def __init__(self,
-        vae,
-        text_encoder,
-        tokenizer,
-        unet,
-        scheduler,
-        safety_checker,
-        feature_extractor,
-        requires_safety_checker: bool = True,
-    ):
+                 vae,
+                 text_encoder,
+                 tokenizer,
+                 unet,
+                 scheduler,
+                 safety_checker,
+                 feature_extractor,
+                 requires_safety_checker: bool = True,
+                 ):
         super(WMDetectStableDiffusionPipeline, self).__init__(vae,
-                text_encoder,
-                tokenizer,
-                unet,
-                scheduler,
-                safety_checker,
-                feature_extractor,
-                requires_safety_checker)
-        self.forward_diffusion = partial(self.backward_diffusion, reverse_process=True)
+                                                              text_encoder,
+                                                              tokenizer,
+                                                              unet,
+                                                              scheduler,
+                                                              safety_checker,
+                                                              feature_extractor,
+                                                              requires_safety_checker)
+        self.forward_diffusion = partial(
+            self.backward_diffusion, reverse_process=True)
 
     ######### From Tree-Rings repo, for inverse diffusion model ########
     @torch.inference_mode()
@@ -311,7 +324,7 @@ class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
         ).input_ids
         text_embeddings = self.text_encoder(text_input_ids.to(self.device))[0]
         return text_embeddings
-    
+
     # The reverse of decode_latents_tensor()
     @torch.inference_mode()
     def get_image_latents(self, image: torch.Tensor, sample=True, rng_generator=None):
@@ -334,7 +347,7 @@ class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
             )
             + x_t
         )
-    
+
     @torch.inference_mode()
     def backward_diffusion(
         self,
@@ -342,12 +355,12 @@ class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
         text_embeddings=None,
         old_text_embeddings=None,
         new_text_embeddings=None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: torch.FloatTensor | None = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
-        reverse_process: True = False,
+        callback: Callable[[int, int, torch.FloatTensor], None] | None = None,
+        callback_steps: int | None = 1,
+        reverse_process: bool = False,
         **kwargs,
     ):
         """ Generate image from text prompt and latents
@@ -369,7 +382,6 @@ class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
         else:
             prompt_to_prompt = False
 
-
         for i, t in enumerate(self.progress_bar(timesteps_tensor if not reverse_process else reversed(timesteps_tensor))):
             if prompt_to_prompt:
                 if i < use_old_emb_i:
@@ -379,9 +391,11 @@ class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
 
             # expand the latents if we are doing classifier free guidance
             latent_model_input = (
-                torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                torch.cat(
+                    [latents] * 2) if do_classifier_free_guidance else latents
             )
-            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+            latent_model_input = self.scheduler.scale_model_input(
+                latent_model_input, t)
 
             # predict the noise residual
             noise_pred = self.unet(
@@ -403,8 +417,8 @@ class WMDetectStableDiffusionPipeline(WatermarkStableDiffusionPipeline):
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
                 callback(i, t, latents)
-            
-            # ddim 
+
+            # ddim
             alpha_prod_t = self.scheduler.alphas_cumprod[t]
             alpha_prod_t_prev = (
                 self.scheduler.alphas_cumprod[prev_timestep]

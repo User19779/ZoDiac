@@ -20,6 +20,10 @@ import logging
 import shutil
 import numpy as np
 from PIL import Image
+
+import rawpy
+import imageio
+
 logger = logging.getLogger()
 handler = logging.StreamHandler()
 handler.setLevel(logging.INFO)
@@ -33,7 +37,7 @@ os.environ['TORCH_HOME'] = './torch_cache'
 
 # %%
 logging.info(f'===== Load Config =====')
-device = torch.device('cuda:0')
+device = torch.device('cuda:1')
 # device = torch.device('cpu')
 
 with open('./example/config/config.yaml', 'r') as file:
@@ -43,10 +47,38 @@ logging.info(cfgs)
 
 # %%
 # ZLW：修改这个 get_img_tensor 函数，让模型取得的图片只包含人像部分
-imagename = '645_1'
+imagename = '1010_0'
+# 使用rawpy加载NEF文件
+with rawpy.imread(f'./example/input_raw/{imagename}.NEF') as raw:
+    # 将图像转换为RGB模式
+    rgb = raw.postprocess()
+# 保存为PNG文件
+imageio.imsave(f'./example/input_big/{imagename}.png', rgb)
+
+# 下采样？
+
+
+def reduce_image_resolution(image_path, output_path):
+    # 打开原始图像
+    with Image.open(image_path) as img:
+        width, height = img.size
+        new_width = width // 12
+        new_height = height // 12
+        resized_img = img.resize(
+            (new_width, new_height), Image.Resampling.LANCZOS)
+        resized_img.save(output_path)
+
+
+reduce_image_resolution(
+    f'./example/input_big/{imagename}.png',
+    f'./example/input/{imagename}.png')
+reduce_image_resolution(
+    f'./example/input_mask_big/{imagename}.png',
+    f'./example/input_mask/{imagename}.png')
+
 gt_img_tensor = get_img_tensor(
-    f'./example/input/{imagename}.tif', device,
-    mask=f'./example/input_mask/{imagename}.png')
+    f'./example/input/{imagename}.png', device,
+    mask=f'./example/input_mask/{imagename}.png', )
 
 # imagename = 'pepper'
 # gt_img_tensor = get_img_tensor(
@@ -119,7 +151,7 @@ loss_lst = []
 
 # %%
 # Step 3: train the init latents
-if True:
+if False:
     for i in range(cfgs['iters']):
         logging.info(f'iter {i}:')
         init_latents_wm = wm_pipe.inject_watermark(init_latents)
@@ -191,7 +223,8 @@ psnr_value = compute_psnr(img_tensor, gt_img_tensor)
 
 tester_prompt = ''
 text_embeddings = pipe.get_text_embedding(tester_prompt)
-det_prob = 1 - watermark_prob(img_tensor, pipe, wm_pipe, text_embeddings)
+det_prob = 1 - watermark_prob(img_tensor, pipe,
+                              wm_pipe, text_embeddings, device=device)
 
 
 path = os.path.join(
@@ -211,11 +244,9 @@ def compare_image_sizes(path1, path2):
     return (width2 >= width1 and height2 >= height1)
 
 
-assert compare_image_sizes(f'./example/input_mask/{imagename}.png',
-                           f'./example/background_pictures/00000001.jpg')
 masked_img_tensor = get_img_tensor(
     path, device, f'./example/input_mask/{imagename}.png', mask_value=127,
-    background_image=f'./example/background_pictures/00000001.jpg')
+    background_image=None,)
 
 masked_img_tensor = masked_img_tensor.unsqueeze(0)
 masked_path = os.path.join(
@@ -269,7 +300,7 @@ for attacker_name, attacker in attackers.items():
 # case_list = ['w/ rot', 'w/o rot']
 case_list = ['w/o rot',]
 
-logging.info(f'===== Init Attackers =====')
+logging.info(f'===== Init Attackers(\'all\') =====')
 att_pipe = ReSDPipeline.from_pretrained(
     "./stable-diffusion-2-1-base/", torch_dtype=torch.float16)
 att_pipe.set_progress_bar_config(disable=True)
@@ -340,7 +371,8 @@ text_embeddings = pipe.get_text_embedding(tester_prompt)
 
 # %%
 logging.info(f'===== Testing the Watermarked Images {post_img} =====')
-det_prob = 1 - watermark_prob(post_img, pipe, wm_pipe, text_embeddings)
+det_prob = 1 - watermark_prob(post_img, pipe,
+                              wm_pipe, text_embeddings, device=device)
 logging.info(f'Watermark Presence Prob.: {det_prob}')
 
 
@@ -354,5 +386,5 @@ for attacker_name in attackers:
     logging.info(f'=== Attacker Name: {attacker_name} ===')
     det_prob = 1 - watermark_prob(
         os.path.join(wm_path, attacker_name, os.path.basename(post_img)),
-        pipe, wm_pipe, text_embeddings)
+        pipe, wm_pipe, text_embeddings, device=device)
     logging.info(f'Watermark Presence Prob.: {det_prob}')
