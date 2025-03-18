@@ -272,7 +272,10 @@ class DiffWMAttacker(WMAttacker):
                     else:
                         prompts.append("")
             else:
-                prompts = [""] * len(image_paths)
+                # prompts = [""] * len(image_paths)
+                with open('example/diffu_attack_prompt.txt', 'r', encoding='utf-8') as file:
+                    content = file.read()
+                prompts = [content] * len(image_paths)
 
             for (img_path, out_path), prompt in tqdm(zip(zip(image_paths, out_paths), prompts)):
                 if os.path.exists(out_path) and not multi:

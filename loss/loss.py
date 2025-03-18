@@ -38,3 +38,9 @@ class LossProvider(nn.Module):
         logging.info(
             f'Watermark {lossW.item():.4f}, Image {lossI.item():.4f}, Perp {lossP.item():.4f}, SSIM {lossS.item():.4f} Total Loss {loss.item():.4f}')
         return loss
+
+
+class LossProviderMultiLatent(LossProvider):
+    def __init__(self):
+        # FIXME 更改这一部分，能够支持多个 init_latents 和 wm_pipe.watermarking_mask
+        raise NotImplementedError

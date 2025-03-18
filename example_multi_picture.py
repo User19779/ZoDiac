@@ -21,6 +21,9 @@ import shutil
 import numpy as np
 from PIL import Image
 
+# 新增模块：分割图像为小方格快
+from main.divide_picture import GetDivideMethod
+
 import rawpy
 import imageio
 import gc
@@ -89,7 +92,7 @@ def compare_image_sizes(path1, path2):
 
 # %%
 # ZLW：修改循环
-imagename_list = [f'1030_{i}' for i in range(1,8,1)]
+imagename_list = [f'1030_{i}' for i in range(2, 3, 1)]
 for imagename in imagename_list:
     # 使用rawpy加载NEF文件
     with rawpy.imread(f'./example/input_raw/{imagename}.NEF') as raw:
@@ -109,7 +112,6 @@ for imagename in imagename_list:
     gt_img_tensor = get_img_tensor(
         f'./example/input/{imagename}.png', device,
         mask=f'./example/input_mask/{imagename}.png', )
-
     # imagename = 'pepper'
     # gt_img_tensor = get_img_tensor(
     #     f'./example/input/{imagename}.tiff', device, )
@@ -119,6 +121,16 @@ for imagename in imagename_list:
         image_after_mask = transforms.ToPILImage("RGB")(gt_img_tensor)
         image_after_mask.save(f'./example/input_after_mask/{imagename}.png')
     gt_img_tensor = gt_img_tensor.unsqueeze(0)
+
+    # FIXME 图片分割、计算。将分割方式以某种方式存储到磁盘上。
+    gt_mask_tensor = Image.open(
+        f'./example/input_mask/{imagename}.png').convert("L")
+    gt_mask_tensor = pil_to_tensor(gt_mask_tensor)
+    # 定义划分的正方形的数量
+    M = 4
+    # 给出的坐标是 ((x1,y1,x2,y2)_1,(x1,y1,x2,y2)_2,...) 形式的分割方法
+    # tensor.shape (M,4)
+    divide_method = GetDivideMethod(gt_mask_tensor, areas_num=M)
 
     watermark_shape = (
         1, 4, gt_img_tensor.shape[2]//8, gt_img_tensor.shape[3]//8)
@@ -150,7 +162,7 @@ for imagename in imagename_list:
 
     # %%
     # Step 1: Get init noise
-    
+
     # FIXME 对所有的 子图片 进行一遍，得到不同的 reversed latents
     def get_init_latent(img_tensor, pipe, text_embeddings, guidance_scale=1.0):
         # DDIM inversion from the given image
@@ -169,7 +181,7 @@ for imagename in imagename_list:
 
     # %%
     # Step 2: prepare training
-    
+
     # FIXME 对所有的 子图片 进行一遍，得到不同的 reversed latents
     init_latents = init_latents_approx.detach().clone()
     init_latents.requires_grad = True
@@ -185,6 +197,8 @@ for imagename in imagename_list:
     if True:
         for i in range(cfgs['iters']):
             logger.info(f'iter {i}:')
+            # FIXME 对所有的 子图片 分别注入
+            # FIXME 可能需要重新写一下 inject_watermark ，适应不同的图片的长度
             init_latents_wm = wm_pipe.inject_watermark(init_latents)
             if cfgs['empty_prompt']:
                 pred_img_tensor = pipe('', guidance_scale=1.0, num_inference_steps=50, output_type='tensor',
@@ -210,6 +224,7 @@ for imagename in imagename_list:
 
     # %% [markdown]
     # ## Postprocessing with Adaptive Enhancement
+    # 这里是从 0 和 1 之间寻找一个合适的图像水印强度，不涉及图像水印本身的过程
 
     # %%
     # hyperparameter
@@ -234,6 +249,7 @@ for imagename in imagename_list:
 
     tester_prompt = ''
     text_embeddings = pipe.get_text_embedding(tester_prompt)
+    # watermark_prob 应该不需要更改
     det_prob = 1 - watermark_prob(img_tensor, pipe,
                                   wm_pipe, text_embeddings, device=device)
 
@@ -396,4 +412,3 @@ for imagename in imagename_list:
     # 回收缓存
     gc.collect()
     torch.cuda.empty_cache()
-
