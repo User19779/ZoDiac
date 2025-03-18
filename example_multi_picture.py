@@ -1,5 +1,6 @@
 # %%
 from main.attdiffusion import ReSDPipeline
+from main.divide_picture import save_adjust_image
 from main.wmattacker import *
 import rich
 from loss.pytorch_ssim import ssim
@@ -7,6 +8,7 @@ from loss.loss import LossProvider
 from main.utils import *
 from main.wmpatch import GTWatermark, GTWatermarkMulti
 from main.wmdiffusion import WMDetectStableDiffusionPipeline
+import diffusers
 from diffusers.utils.torch_utils import randn_tensor
 from datasets import load_dataset
 from diffusers import DDIMScheduler
@@ -47,7 +49,7 @@ os.environ['TORCH_HOME'] = './torch_cache'
 
 # %%
 logger.info(f'===== Load Config =====')
-device = torch.device('cuda:1')
+device = torch.device('cuda:0')
 # device = torch.device('cpu')
 
 with open('./example/config/config.yaml', 'r') as file:
@@ -82,17 +84,9 @@ def binary_search_theta(threshold, lower=0., upper=1., precision=1e-6, max_iter=
     return lower
 
 
-def compare_image_sizes(path1, path2):
-    with Image.open(path1) as img1:
-        width1, height1 = img1.size
-    with Image.open(path2) as img2:
-        width2, height2 = img2.size
-    return (width2 >= width1 and height2 >= height1)
-
-
 # %%
 # ZLW：修改循环
-imagename_list = [f'1030_{i}' for i in range(2, 3, 1)]
+imagename_list = [f'1010_{i}' for i in range(0, 1, 1)]
 for imagename in imagename_list:
     # 使用rawpy加载NEF文件
     with rawpy.imread(f'./example/input_raw/{imagename}.NEF') as raw:
@@ -111,32 +105,59 @@ for imagename in imagename_list:
 
     gt_img_tensor = get_img_tensor(
         f'./example/input/{imagename}.png', device,
-        mask=f'./example/input_mask/{imagename}.png', )
-    # imagename = 'pepper'
-    # gt_img_tensor = get_img_tensor(
-    #     f'./example/input/{imagename}.tiff', device, )
-
-    wm_path = cfgs['save_img']
+        mask=f'./example/input_mask/{imagename}.png',
+        make_square=False)
     if True:
         image_after_mask = transforms.ToPILImage("RGB")(gt_img_tensor)
         image_after_mask.save(f'./example/input_after_mask/{imagename}.png')
     gt_img_tensor = gt_img_tensor.unsqueeze(0)
 
-    # FIXME 图片分割、计算。将分割方式以某种方式存储到磁盘上。
-    gt_mask_tensor = Image.open(
-        f'./example/input_mask/{imagename}.png').convert("L")
-    gt_mask_tensor = pil_to_tensor(gt_mask_tensor)
-    # 定义划分的正方形的数量
-    M = 4
-    # 给出的坐标是 ((x1,y1,x2,y2)_1,(x1,y1,x2,y2)_2,...) 形式的分割方法
-    # tensor.shape (M,4)
-    divide_method = GetDivideMethod(gt_mask_tensor, areas_num=M)
+    gt_mask = Image.open(
+        f'./example/input_mask/{imagename}.png').convert("1")
 
+    gt_mask_tensor = pil_to_tensor(gt_mask)
+
+    # 确定图像的边界
+    # pos : (min_x,min_y,max_x,max_y)
+    pos = GetDivideMethod(gt_mask_tensor)
+
+    # 根据边界，切出三个图像，分别将人像部分放在左侧、25%位置，中间、75%位置，右侧
+    # 需要考虑横向图片（卧姿）的情况，这个时候需要将人像部分放在上侧，25%位置，中间，75%位置，下侧
+    save_adjust_image(
+        image_after_mask, gt_mask, pos, f'./example/input_after_mask', imagename)
+
+del rgb, gt_img_tensor, image_after_mask, gt_mask, gt_mask_tensor,
+
+
+scheduler = DDIMScheduler.from_pretrained(
+    cfgs['model_id'], subfolder="scheduler")
+pipe = WMDetectStableDiffusionPipeline.from_pretrained(
+    cfgs['model_id'], scheduler=scheduler).to(device)
+pipe.set_progress_bar_config(disable=True)
+
+assert isinstance(pipe, WMDetectStableDiffusionPipeline)
+assert isinstance(
+    scheduler, diffusers.schedulers.scheduling_ddim.DDIMScheduler)
+
+for imagename in imagename_list:
+    gt_img_tensors: list[torch.Tensor] = list()
+    mask_tensors: list[torch.Tensor] = list()
+    for i in range(5):
+        gt_img_tensors.append(get_img_tensor(
+            f'./example/input_after_mask/{imagename}_pos_{i+1}.png', device,
+            mask=f'./example/input_after_mask/{imagename}_mask_{i+1}.png',
+            make_square=False))
+        mask_tensors.append(get_img_tensor(
+            f'./example/input_after_mask/{imagename}_mask_{i+1}.png', device,
+            make_square=False))
     watermark_shape = (
-        1, 4, gt_img_tensor.shape[2]//8, gt_img_tensor.shape[3]//8)
+        1, 4, gt_img_tensors[0].shape[-2]//8, gt_img_tensors[0].shape[-1]//8)
     rich.print(f"Watermark Shape:[{watermark_shape}]")
+    # 为后续的操作做准备
+    for i in range(5):
+        gt_img_tensors[i] = torch.unsqueeze(gt_img_tensors[i], 0)
 
-    # %%
+    wm_path = cfgs['save_img']
     logger.info(f'===== Init Pipeline =====')
     if cfgs['w_type'] == 'single':
         wm_pipe = GTWatermark(
@@ -150,13 +171,8 @@ for imagename in imagename_list:
             w_settings=cfgs['w_settings'],
             generator=torch.Generator(device).manual_seed(cfgs['w_seed']),
         )
-
-    scheduler = DDIMScheduler.from_pretrained(
-        cfgs['model_id'], subfolder="scheduler")
-    pipe = WMDetectStableDiffusionPipeline.from_pretrained(
-        cfgs['model_id'], scheduler=scheduler).to(device)
-    pipe.set_progress_bar_config(disable=True)
-
+    else:
+        raise NotImplementedError
     # %% [markdown]
     # ## Image Watermarking
 
@@ -168,24 +184,29 @@ for imagename in imagename_list:
         # DDIM inversion from the given image
         img_latents = pipe.get_image_latents(img_tensor, sample=False)
         reversed_latents = pipe.forward_diffusion(
-            latents=img_latents,
-            text_embeddings=text_embeddings,
-            guidance_scale=guidance_scale,
-            num_inference_steps=50,
+            latents=img_latents, text_embeddings=text_embeddings,
+            guidance_scale=guidance_scale, num_inference_steps=50,
         )
         return reversed_latents
 
     empty_text_embeddings = pipe.get_text_embedding('')
-    init_latents_approx = get_init_latent(
-        gt_img_tensor, pipe, empty_text_embeddings)
 
     # %%
     # Step 2: prepare training
 
     # FIXME 对所有的 子图片 进行一遍，得到不同的 reversed latents
-    init_latents = init_latents_approx.detach().clone()
-    init_latents.requires_grad = True
-    optimizer = optim.Adam([init_latents], lr=0.01)
+    init_latents = list()
+    for i in range(5):
+        init_latents_approx = get_init_latent(
+            gt_img_tensors[i], pipe, empty_text_embeddings)
+        init_latents.append(init_latents_approx.detach().clone())
+        init_latents[i].requires_grad = False
+
+    # 定义 delta latents
+    delta_latent = torch.zeros_like(init_latents[0])
+    delta_latent.requires_grad = True
+
+    optimizer = optim.Adam(delta_latent, lr=0.01)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=[30, 80], gamma=0.3)
 
@@ -199,28 +220,42 @@ for imagename in imagename_list:
             logger.info(f'iter {i}:')
             # FIXME 对所有的 子图片 分别注入
             # FIXME 可能需要重新写一下 inject_watermark ，适应不同的图片的长度
-            init_latents_wm = wm_pipe.inject_watermark(init_latents)
-            if cfgs['empty_prompt']:
-                pred_img_tensor = pipe('', guidance_scale=1.0, num_inference_steps=50, output_type='tensor',
-                                       use_trainable_latents=True, init_latents=init_latents_wm).images  # type: ignore
-            else:
-                pred_img_tensor = pipe(prompt, num_inference_steps=50, output_type='tensor',
-                                       use_trainable_latents=True, init_latents=init_latents_wm).images  # type: ignore
-            loss = totalLoss(pred_img_tensor, gt_img_tensor,
-                             init_latents_wm, wm_pipe)
+
+            init_latents_wm = tuple(wm_pipe.inject_watermark(
+                init_latents[i] + delta_latent) for i in range(5))
+            pred_img_tensors = []
+            loss_across_images = 0.0
+            for pos_num in range(5):
+                if cfgs['empty_prompt']:
+                    pred_img_tensor = pipe(
+                        '', guidance_scale=1.0, num_inference_steps=50, output_type='tensor',
+                        use_trainable_latents=True, init_latents=init_latents_wm).images
+                else:
+                    pred_img_tensor = pipe(
+                        prompt, num_inference_steps=50, output_type='tensor',
+                        use_trainable_latents=True, init_latents=init_latents_wm).images
+                pred_img_tensors.append(pred_img_tensor)
+
+                loss_across_images += totalLoss(
+                    pred_img_tensor, gt_img_tensor[pos_num],
+                    init_latents_wm, wm_pipe)
 
             optimizer.zero_grad()
-            loss.backward()
+            loss_across_images.backward()
             optimizer.step()
             scheduler.step()
 
-            loss_lst.append(loss.item())
+            loss_lst.append(loss_across_images.item())
             # save watermarked image
             if (i+1) in cfgs['save_iters']:
-                path = os.path.join(
-                    wm_path, f"{imagename.split('.')[0]}_{i+1}.png")
-                save_img(path, pred_img_tensor, pipe)
+                for pos_num in range(5):
+                    path = os.path.join(
+                        wm_path, f"{imagename.split('.')[0]}_{i+1}_pos{pos_num}.png")
+                    save_img(path, pred_img_tensors[pos_num], pipe)
         torch.cuda.empty_cache()
+
+    print("Skipping lines below 257.")
+    continue
 
     # %% [markdown]
     # ## Postprocessing with Adaptive Enhancement
@@ -228,6 +263,7 @@ for imagename in imagename_list:
 
     # %%
     # hyperparameter
+
     ssim_threshold = cfgs['ssim_threshold']
 
     # %%

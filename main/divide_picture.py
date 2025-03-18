@@ -4,49 +4,65 @@ from PIL import Image, ImageDraw
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import distance
-
-from sklearn.datasets import make_blobs
-from sklearn.metrics.pairwise import manhattan_distances
-from sklearn_extra.cluster import KMedoids
-
 import torch
 import torch.nn.functional as F
 
-
-def chebyshev_distance(X, Y, **kwargs):
-    ans = sqrt((X[0]-Y[0])**2+(X[1]-Y[1])**2)
-    return ans
+from main.utils import Image
+from main.wmattacker import Image
 
 
 def GetDivideMethod(
-    mask_tensor: torch.Tensor, areas_num: int = 4
-) -> None:
-    # 下采样
-    original_width, original_height = mask_tensor.shape[1:]
-    target_height = mask_tensor.shape[1] // 10
-    target_width = mask_tensor.shape[2] // 10
+    mask_tensor: torch.Tensor
+) -> tuple[int, ...]:
+    print(mask_tensor.shape)
 
-    # 使用 interpolate 函数进行下采样
-    downsampled_tensor = F.interpolate(
-        mask_tensor.unsqueeze(0),
-        size=(target_height, target_width),)
+    check_cover_rate = False
+    if check_cover_rate:
+        white_pixel_total = mask_tensor.sum().item()
+        target_white_pixels = int(white_pixel_total * 0.97)
 
-    white_pixels = np.column_stack(np.where(downsampled_tensor > 127))
-    print(white_pixels.shape)
+    white_positions = torch.nonzero(mask_tensor)
+    min_y, min_x = white_positions[:, 1].min().item(), \
+        white_positions[:, 2].min().item()
+    max_y, max_x = white_positions[:, 1].max().item(), \
+        white_positions[:, 2].max().item()
+    ans = (min_x, min_y, max_x, max_y)
+    ans = tuple(int(i) for i in ans)
+    return ans
 
-    kmeans = KMedoids(
-        n_clusters=areas_num,
-        metric=chebyshev_distance, random_state=42)  # type: ignore
-    kmeans.fit(white_pixels)
 
-    # 各个簇的范围
-    clusters = {i: [] for i in range(areas_num)}
+def save_adjust_image(
+        img: Image.Image, mask: Image.Image, area_pos: tuple[int, ...],
+        save_path: str, img_name: str):
+    min_x, min_y, max_x, max_y = area_pos
+    region_width = max_x - min_x
+    region_height = max_y - min_y
 
-    cluster_labels = kmeans.labels_
-    for cluster_id, pixel in zip(cluster_labels, white_pixels):
-        clusters[cluster_id].append(pixel)
+    if region_width > region_height:
+        # Width is greater than height, horizontal alignment
+        square_size = region_width
+        for i, pos in enumerate([0, 0.25, 0.5, 0.75, 1]):
+            paste_pos_y = int(pos * (square_size - region_height))
+            img_temp = Image.new('RGB', (square_size, square_size), 'white')
+            img_temp.paste(
+                img.crop((min_x, min_y, max_x, max_y)), (0, paste_pos_y))
+            img_temp.save(osp.join(save_path, f'{img_name}_pos_{i+1}.png'))
 
-    print(list(len(clusters[i]) for i in range(areas_num)))
+            mask_temp = Image.new('RGB', (square_size, square_size), 'black')
+            mask_temp.paste(
+                mask.crop((min_x, min_y, max_x, max_y)), (0, paste_pos_y))
+            mask_temp.save(osp.join(save_path, f'{img_name}_mask_{i+1}.png'))
+    else:
+        # Height is greater or equal to width, vertical alignment
+        square_size = region_height
+        for i, pos in enumerate([0, 0.25, 0.5, 0.75, 1]):
+            paste_pos_x = int(pos * (square_size - region_width))
+            img_temp = Image.new('RGB', (square_size, square_size), 'white')
+            img_temp.paste(
+                img.crop((min_x, min_y, max_x, max_y)), (paste_pos_x, 0))
+            img_temp.save(osp.join(save_path, f'{img_name}_pos_{i+1}.png'))
 
-    print("A")
-    return None
+            mask_temp = Image.new('RGB', (square_size, square_size), 'black')
+            mask_temp.paste(
+                mask.crop((min_x, min_y, max_x, max_y)), (paste_pos_x, 0))
+            mask_temp.save(osp.join(save_path, f'{img_name}_mask_{i+1}.png'))
