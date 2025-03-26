@@ -1,5 +1,8 @@
 {
     "python.analysis.typeCheckingMode": "basic",
     "python.terminal.activateEnvironment": false,
-    "debugpy.showPythonInlineValues": false
+    "debugpy.showPythonInlineValues": false,
+    "autopep8.args": [
+        "[\"--max-line-length\",\"120\",]"
+    ]
 }
