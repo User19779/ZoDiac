@@ -1,40 +1,35 @@
 # %%
-# 标准库
-import argparse
-import gc
-import json
-import logging
-import os
-import shutil
-
-# 第三方库
-import numpy as np
+from main.attdiffusion import ReSDPipeline
+from main.divide_picture import save_adjust_image
+from main.wmattacker import *
 import rich
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
+from loss.pytorch_ssim import ssim
+from loss.loss import LossProvider
+from main.utils import *
+from main.wmpatch import GTWatermark, GTWatermarkMulti
+from main.wmdiffusion import WMDetectStableDiffusionPipeline
+import diffusers
+from diffusers.utils.torch_utils import randn_tensor
 from datasets import load_dataset
 from diffusers import DDIMScheduler
-from diffusers.utils.torch_utils import randn_tensor
-from PIL import Image
-from torchvision.transforms import transforms
+import torchvision.transforms as transforms
+import torch.optim as optim
+import torch
+import argparse
 import yaml
+import os
+import logging
+import shutil
+import numpy as np
+from PIL import Image
+import json
 
-# 自定义模块
-from loss.loss import LossProvider
-from loss.pytorch_ssim import ssim
-from main.attdiffusion import ReSDPipeline
-from main.divide_picture import GetDivideMethod, save_adjust_image
-from main.utils import *
-from main.wmattacker import *
-from main.wmdiffusion import WMDetectStableDiffusionPipeline
-from main.wmpatch import GTWatermark, GTWatermarkMulti
+# 新增模块：分割图像为小方格快
+from main.divide_picture import GetDivideMethod
 
-# 其他第三方库
-import diffusers
-import imageio
 import rawpy
+import imageio
+import gc
 import os.path as osp
 
 logger = logging.getLogger()
@@ -99,7 +94,7 @@ for imagename in []:
 
   gt_img_tensor = get_img_tensor(
     f'./example/input/{imagename}.png', device,
-    mask=f'./example/input_mask/{imagename}.png',mask_value=(255,0,0))
+    mask=f'./example/input_mask/{imagename}.png',mask_value=(0,255,0))
   if True:
     image_after_mask = transforms.ToPILImage("RGB")(gt_img_tensor)
     image_after_mask.save(f'./example/input_after_mask/{imagename}.png')
@@ -121,7 +116,7 @@ for imagename in []:
   # 需要考虑横向图片（卧姿）的情况,这个时候需要将人像部分放在上侧,25%位置,中间,75%位置,下侧
   save_adjust_image(
     image_after_mask, gt_mask, pos, f'./example/input_after_mask', imagename,
-    background_color=(255,0,0))
+    background_color=(0,255,0))
 
   del rgb, gt_img_tensor, image_after_mask, gt_mask, gt_mask_tensor,
 
@@ -135,28 +130,10 @@ pipe.set_progress_bar_config(disable=True)
 assert isinstance(pipe, WMDetectStableDiffusionPipeline)
 assert isinstance(scheduler, diffusers.schedulers.scheduling_ddim.DDIMScheduler)
 
-
-# 定义一个二层神经网络
-class TwoLayerNet(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(TwoLayerNet, self).__init__()
-        # 定义第一层（从输入层到隐藏层）
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        # 定义第二层（从隐藏层到输出层）
-        self.fc2 = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x):
-        x_res = x
-        # 通过第一层并应用激活函数（如 ReLU）
-        x = F.relu(self.fc1(x)) + x
-        # 通过第二层（输出层通常不需要激活函数，视任务而定）
-        x = self.fc2(x)
-        return (x + x_res)
-
-
 for imagename in imagename_list:
   gt_img_tensors: list[torch.Tensor] = list()
   mask_tensors: list[torch.Tensor] = list()
+  
   for i in range(5):
     gt_img_tensors.append(get_img_tensor(
       f'./example/input_after_mask/{imagename}_pos_{i+1}.png', device,
@@ -213,23 +190,48 @@ for imagename in imagename_list:
 
   single_picture_only = False
   if single_picture_only:
-    for i in range(5):
-      init_latents_approx = get_init_latent(
-        gt_img_tensors[i], pipe, empty_text_embeddings)
-      init_latents.append(init_latents_approx.detach().clone())
-      init_latents[i].requires_grad = False
-  else:
     init_latents_approx = get_init_latent(
-      gt_img_tensors[i], pipe, empty_text_embeddings)
-    init_latents = [torch.zeros_like(init_latents_approx,device=device) for j in range(5)]
+      gt_img_tensors[2], pipe, empty_text_embeddings)
+    init_latents = [torch.zeros_like(
+      init_latents_approx,device=device) for j in range(5)] # type: ignore
     init_latents[2]=(init_latents_approx.detach().clone())
     init_latents[2].requires_grad = False
-
+  else:
+    for pos_num in range(5):
+      init_latents_approx = get_init_latent(
+        gt_img_tensors[pos_num], pipe, empty_text_embeddings)
+      init_latents.append(init_latents_approx.detach().clone())
+      init_latents[pos_num].requires_grad = False
+      
   # 定义 delta latents
-  dim = init_latents[2].shape[-1]
-  delta_latent_net = TwoLayerNet(dim,dim,dim).to(device)
+  img_edge_length = int(gt_img_tensors[0].shape[2])
+  # 以下数字表示图像边界和外接矩形之间的边界的 像素个数
+  left_space,top_space,right_space,bottom_space = 0,0,0,0
+  for pos_num in range(5):
+    with open(f'./example/input_after_mask/{imagename}_info_{pos_num+1}.json','r',encoding='utf-8') as f:
+      obj = json.load(f)
+      pos = obj["pos"]
+      pos_left,pos_top,pos_right,pos_bottom = pos
+    
+    left_space = max(left_space,pos_left)
+    top_space = max(top_space,pos_top)
+    right_space = max(right_space,img_edge_length-pos_right-1)
+    bottom_space = max(bottom_space,img_edge_length-pos_bottom-1)
+  original_delta_latent = torch.zeros(
+    (right_space+left_space+img_edge_length),(top_space+bottom_space+img_edge_length))
+  original_delta_latent.requires_grad = True
+  
+  delta_latents=[]
+  for pos_num in range(5):
+    with open(f'./example/input_after_mask/{imagename}_info_{pos_num+1}.json','r',encoding='utf-8') as f:
+      obj = json.load(f)
+      pos = obj["pos"]
+      pos_left,pos_top,pos_right,pos_bottom = pos
+      delta_latents.append(original_delta_latent[
+        :,left_space-pos_left:left_space-pos_left+img_edge_length,top_space-pos_top:top_space-pos_top+img_edge_length
+      ])
 
-  optimizer = optim.Adam(delta_latent_net.parameters(), lr=0.01)
+  optimizer = optim.Adam([original_delta_latent,], lr=0.01)
   scheduler = optim.lr_scheduler.MultiStepLR(
     optimizer, milestones=[30, 80], gamma=0.3)
 
@@ -240,20 +242,20 @@ for imagename in imagename_list:
   # Step 3: train the init latents·
   if True:
     torch.cuda.empty_cache()
-    for i in range(cfgs['iters']):
-      logger.info(f'iter {i}:')
+    for iter in range(cfgs['iters']):
+      logger.info(f'iter {iter}:')
       # FIXME 对所有的 子图片 分别注入
       # FIXME 可能需要重新写一下 inject_watermark ,适应不同的图片的长度
-
+      
       init_latents_wms = tuple(wm_pipe.inject_watermark(
-        delta_latent_net(init_latents[pos])) for pos in range(5))
+        init_latents[pos] + delta_latents[pos]) for pos in range(5))
       pred_img_tensors = []
       loss_across_images = 0.0
 
       optimizer.zero_grad()
       for pos_num in range(5):
         # for abilation study use
-        if single_picture_only and pos_num!=2 and ((i+1) not in cfgs['save_iters']):
+        if single_picture_only and pos_num!=2 and ((iter+1) not in cfgs['save_iters']):
           continue
         if cfgs['empty_prompt']:
           pred_img_tensor = pipe(
@@ -277,10 +279,10 @@ for imagename in imagename_list:
 
       loss_lst.append(loss_across_images)
       # save watermarked image
-      if (i+1) in cfgs['save_iters']:
+      if (iter+1) in cfgs['save_iters']:
         for pos_num in range(5):
           path = os.path.join(
-            wm_path, f"{imagename.split('.')[0]}_{i+1}_pos_{pos_num+1}.png")
+            wm_path, f"{imagename.split('.')[0]}_{iter+1}_pos_{pos_num+1}.png")
           save_img(path, pred_img_tensors[pos_num], pipe)
     gc.collect()
     torch.cuda.empty_cache()
@@ -288,7 +290,7 @@ for imagename in imagename_list:
   def binary_search_theta(
     gt_img_tensor:torch.Tensor,wm_img_tensor:torch.Tensor,
     threshold, lower=0., upper=1., precision=1e-6, max_iter=1000,):
-    for i in range(max_iter):
+    for iter in range(max_iter):
       mid_theta = (lower + upper) / 2
       img_tensor = (gt_img_tensor-wm_img_tensor)*mid_theta+wm_img_tensor
       ssim_value = ssim(
@@ -318,7 +320,7 @@ for imagename in imagename_list:
     min_x,min_y,max_x,max_y = pos
   original_rectangle = gt_img_tensor[:,min_y:max_y+1,min_x:max_x+1].detach().clone()
   
-  # 取 5 个的平均最终水印的加密结果,同时取得它对应的mask
+  # 取中间的那个作为最终水印的加密结果,同时取得它对应的mask
   wm_img_path = os.path.join(
     wm_path, f"{imagename.split('.')[0]}_{cfgs['save_iters'][-1]}_pos_3.png")
   wm_img_tensor = get_img_tensor(wm_img_path, device)
@@ -384,10 +386,10 @@ for imagename in imagename_list:
     image_after_mask_name)
   
   img_tensors: list[torch.Tensor] = list()
-  for i in range(5):
+  for pos_num in range(5):
     single_img_tensor = get_img_tensor(
-      osp.join(wm_path,f'{image_after_mask_name}_pos_{i+1}.png'), device,
-      mask=f'./example/input_after_mask/{imagename}_mask_{i+1}.png',)
+      osp.join(wm_path,f'{image_after_mask_name}_pos_{pos_num+1}.png'), device,
+      mask=f'./example/input_after_mask/{imagename}_mask_{pos_num+1}.png',)
     img_tensors.append(single_img_tensor)
     
   det_prob = 1 - watermark_prob(img_tensors[2].unsqueeze(0), pipe,
@@ -541,10 +543,10 @@ for imagename in imagename_list:
       base_name)
     
     img_tensors: list[torch.Tensor] = list()
-    for i in range(5):
+    for pos_num in range(5):
       single_img_tensor = get_img_tensor(
-        osp.join(wm_path,attacker_name,f'{base_name}_pos_{i+1}.png'), device,
-        mask=f'./example/input_after_mask/{imagename}_mask_{i+1}.png',)
+        osp.join(wm_path,attacker_name,f'{base_name}_pos_{pos_num+1}.png'), device,
+        mask=f'./example/input_after_mask/{imagename}_mask_{pos_num+1}.png',)
       img_tensors.append(single_img_tensor)
     
   

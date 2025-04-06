@@ -88,7 +88,7 @@ def adjust_size(img: Image.Image, output_size:tuple[int]|None=None ,fill_color:s
 
 
 def mask_img_tensor(
-    img_tensor, mask_path:str, mask_value:Optional[int]=255,background_image:Optional[str]=None):
+    img_tensor, mask_path:str, mask_value=255,background_image:Optional[str]=None):
     
     img_mask = Image.open(mask_path).convert("1")
     mask_width = img_mask.size[-2]
@@ -106,15 +106,20 @@ def mask_img_tensor(
         background = adjust_size(background,tuple(img_tensor.shape[-1:-3:-1]),"white")
         background_value_tensor = pil_to_tensor(background)
     else:
-        background_value_tensor = torch.full_like(
-            img_tensor, background_value,)
+        if isinstance(background_value,int):
+            background_value_tensor = torch.full_like(
+                img_tensor, background_value,)
+        else:
+            background_value_tensor = torch.tensor(background_value)
+            background_value_tensor = background_value_tensor.unsqueeze(-1).unsqueeze(-1)
+            background_value_tensor =  background_value_tensor.expand_as(img_tensor)
         
     img_tensor = torch.where(
         img_mask_tensor,img_tensor,background_value_tensor)
     return img_tensor
 
 def get_img_tensor(
-    img_path, device, mask:Optional[str]=None, mask_value:Optional[int]=255,
+    img_path, device, mask:Optional[str]=None, mask_value=255,
     background_image:Optional[str]=None,
     return_int:bool=False):
     img = Image.open(img_path).convert("RGB")

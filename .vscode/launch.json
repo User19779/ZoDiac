@@ -8,7 +8,7 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "./example_multi_picture.py",
+            "program": "example_multi_picture.py",
             "console": "integratedTerminal"
         }
     ]

@@ -43,7 +43,7 @@ def GetDivideMethod(
 
 def save_adjust_image(
         img: Image.Image, mask: Image.Image, area_pos: tuple[int, ...],
-        save_path: str, img_name: str, background_color="white"):
+        save_path: str, img_name: str, background_color=(255,255,255)):
     min_x, min_y, max_x, max_y = area_pos
     # 加一是因为 area pos 是闭区间
     region_width = (max_x - min_x + 1 + 7) // 8 * 8

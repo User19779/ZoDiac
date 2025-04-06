@@ -50,6 +50,7 @@ class GTWatermark():
         latents_fft = latents_fft * ~(self.watermarking_mask) + self.gt_patch * self.watermarking_mask
         latents_w = torch.fft.ifft2(torch.fft.ifftshift(latents_fft, dim=(-1, -2))).real
         return latents_w
+    
 
     def eval_watermark(self, latents_w):
         latents_w_fft = torch.fft.fftshift(torch.fft.fft2(latents_w), dim=(-1, -2))
