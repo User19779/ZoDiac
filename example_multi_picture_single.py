@@ -45,7 +45,7 @@ logger.addHandler(handler)
 
 logger_2 = logging.getLogger('print_to_file_logger')
 logger_2.setLevel(logging.DEBUG)  # 设置最低日志级别为DEBUG
-file_handler_2 = logging.FileHandler('app.log')
+file_handler_2 = logging.FileHandler('app_single.log')
 file_handler_2.setLevel(logging.INFO)  # 可以为handler单独设置日志级别
 logger_2.addHandler(file_handler_2)
 
@@ -59,7 +59,7 @@ logger.info(f'===== Load Config =====')
 device = torch.device('cuda:1')
 # device = torch.device('cpu')
 
-with open('./example/config/config.yaml', 'r') as file:
+with open('./example/config/config_single.yaml', 'r') as file:
   cfgs = yaml.safe_load(file)
 logger.info(cfgs)
 
@@ -137,9 +137,9 @@ assert isinstance(scheduler, diffusers.schedulers.scheduling_ddim.DDIMScheduler)
 
 
 # 定义一个二层神经网络
-class TwoLayerNet(nn.Module):
+class TwoLayerNetMulti(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
-        super(TwoLayerNet, self).__init__()
+        super(TwoLayerNetMulti, self).__init__()
         # 定义第一层（从输入层到隐藏层）
         self.fc1 = nn.Linear(input_size, hidden_size)
         # 定义第二层（从隐藏层到输出层）
@@ -152,6 +152,16 @@ class TwoLayerNet(nn.Module):
         # 通过第二层（输出层通常不需要激活函数，视任务而定）
         x = F.tanh(self.fc2(x) + x)
         return (x + x_res)
+
+
+class TwoLayerNet(nn.Module):
+    def __init__(self, delta_shape):
+        super(TwoLayerNet, self).__init__()
+        self.delta_x = nn.Parameter(torch.zeros(delta_shape))  # 使用 nn.Parameter 包装
+
+    def forward(self, x):
+        x = x + self.delta_x  # 使用 self.delta_x
+        return x
 
 
 for imagename in imagename_list:
@@ -211,23 +221,25 @@ for imagename in imagename_list:
   # FIXME 对所有的 子图片 进行一遍,得到不同的 reversed latents
   init_latents = list()
 
-  single_picture_only = False
+  single_picture_only = True
   if single_picture_only:
     init_latents_approx = get_init_latent(
       gt_img_tensors[i], pipe, empty_text_embeddings)
-    init_latents = [torch.zeros_like(init_latents_approx,device=device) for j in range(5)]
+    init_latents = [
+      torch.zeros_like(init_latents_approx,device=device,requires_grad=True) 
+      for j in range(5)]
     init_latents[2]=(init_latents_approx.detach().clone())
-    init_latents[2].requires_grad = True
+    # init_latents[2].requires_grad = False
   else:
     for i in range(5):
       init_latents_approx = get_init_latent(
         gt_img_tensors[i], pipe, empty_text_embeddings)
       init_latents.append(init_latents_approx.detach().clone())
-      init_latents[i].requires_grad = True
+      # init_latents[i].requires_grad = False
 
   # 定义 delta latents
   dim = init_latents[2].shape[-1]
-  delta_latent_net = TwoLayerNet(dim,dim,dim).to(device)
+  delta_latent_net = TwoLayerNet(init_latents[2].shape).to(device)
 
   optimizer = optim.Adam(delta_latent_net.parameters(), lr=0.01)
   scheduler = optim.lr_scheduler.MultiStepLR(
@@ -242,11 +254,15 @@ for imagename in imagename_list:
     torch.cuda.empty_cache()
     for i in range(cfgs['iters']):
       logger.info(f'iter {i}:')
+      # FIXME 对所有的 子图片 分别注入
+      # FIXME 可能需要重新写一下 inject_watermark ,适应不同的图片的长度
 
+      init_latents_wms = tuple(wm_pipe.inject_watermark(
+        delta_latent_net(init_latents[pos])) for pos in range(5))
       pred_img_tensors = []
       
       loss_across_images = 0.0
-      
+
       optimizer.zero_grad()
       for pos_num in range(5):
         # FIXME 对所有的 子图片 分别注入
@@ -278,12 +294,12 @@ for imagename in imagename_list:
       loss_lst.append(loss_across_images)
       # save watermarked image
       if (i+1) in cfgs['save_iters']:
-        gc.collect()
-        torch.cuda.empty_cache()
         for pos_num in range(5):
           path = os.path.join(
             wm_path, f"{imagename.split('.')[0]}_{i+1}_pos_{pos_num+1}.png")
           save_img(path, pred_img_tensors[pos_num], pipe)
+    gc.collect()
+    torch.cuda.empty_cache()
 
   def binary_search_theta(
     gt_img_tensor:torch.Tensor,wm_img_tensor:torch.Tensor,
